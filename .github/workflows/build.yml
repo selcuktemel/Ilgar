@@ -1,0 +1,787 @@
+name: APK derle
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Proje dosyalarını oluştur
+        run: |
+          mkdir -p app app/src/main app/src/main/java/com/qa/apkrunner app/src/main/res/values app/src/main/res/xml
+          cat > settings.gradle.kts <<'KOSUCU_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "APKRunner"
+          include(":app")
+          KOSUCU_EOF
+          cat > build.gradle.kts <<'KOSUCU_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          KOSUCU_EOF
+          cat > gradle.properties <<'KOSUCU_EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          KOSUCU_EOF
+          cat > app/build.gradle.kts <<'KOSUCU_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.qa.apkrunner"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.qa.apkrunner"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              buildTypes {
+                  release { isMinifyEnabled = false }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          KOSUCU_EOF
+          cat > app/src/main/AndroidManifest.xml <<'KOSUCU_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+              <!-- Test edilen uygulamayı bulup açabilmek için (paket görünürlüğü) -->
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:allowBackup="false"
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".AutoService"
+                      android:exported="true"
+                      android:label="@string/app_name"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+
+                  <receiver
+                      android:name=".InstallReceiver"
+                      android:exported="false" />
+              </application>
+          </manifest>
+          KOSUCU_EOF
+          cat > app/src/main/res/values/strings.xml <<'KOSUCU_EOF'
+          <resources>
+              <string name="app_name">APK Koşucu</string>
+              <string name="a11y_desc">Test adımlarını (tıklama, yazma, doğrulama) test edilen uygulamada çalıştırmak için gerekli.</string>
+          </resources>
+          KOSUCU_EOF
+          cat > app/src/main/res/xml/accessibility_service_config.xml <<'KOSUCU_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews"
+              android:canRetrieveWindowContent="true"
+              android:canPerformGestures="true"
+              android:notificationTimeout="100"
+              android:description="@string/a11y_desc" />
+          KOSUCU_EOF
+          cat > app/src/main/java/com/qa/apkrunner/AutoService.kt <<'KOSUCU_EOF'
+          package com.qa.apkrunner
+
+          import android.accessibilityservice.AccessibilityService
+          import android.content.Intent
+          import android.view.accessibility.AccessibilityEvent
+
+          /** Diğer uygulamaların ekranını okuyup tıklama/yazma yapabilen erişilebilirlik hizmeti. */
+          class AutoService : AccessibilityService() {
+
+              companion object {
+                  @Volatile
+                  var instance: AutoService? = null
+              }
+
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  instance = this
+              }
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  instance = null
+                  return super.onUnbind(intent)
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+
+              override fun onInterrupt() {}
+          }
+          KOSUCU_EOF
+          cat > app/src/main/java/com/qa/apkrunner/Engine.kt <<'KOSUCU_EOF'
+          package com.qa.apkrunner
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.content.Intent
+          import android.graphics.Path
+          import android.graphics.Rect
+          import android.os.Bundle
+          import android.view.accessibility.AccessibilityNodeInfo
+
+          class StepError(msg: String) : Exception(msg)
+
+          /** Ekrandaki sonuç günlüğü (uygulama arka plandayken de birikir). */
+          object RunState {
+              private val sb = StringBuilder()
+
+              @Volatile
+              var running = false
+
+              @Synchronized
+              fun clear() { sb.setLength(0) }
+
+              @Synchronized
+              fun add(line: String) { sb.append(line).append('\n') }
+
+              @Synchronized
+              fun text(): String = sb.toString()
+          }
+
+          object Engine {
+              @Volatile
+              var abort = false
+
+              private class Ctx(val svc: AutoService, val pkg: String, val timeout: Long)
+              private class Sel(val key: String, val contains: Boolean, val v: String)
+              private class Sc(val name: String, val steps: List<String>, val error: String?)
+
+              // ---------------------------------------------------------------- ayrıştırma
+              private class Item(val kind: String, val name: String) {
+                  val steps = mutableListOf<String>()
+              }
+
+              private fun parse(text: String): List<Sc> {
+                  val items = mutableListOf<Item>()
+                  var cur: Item? = null
+                  val head = Regex("^(scenario|fragment):\\s*(.+)$", RegexOption.IGNORE_CASE)
+                  for (raw in text.lines()) {
+                      val l = raw.trim()
+                      if (l.isEmpty() || l.startsWith("#")) continue
+                      val m = head.find(l)
+                      if (m != null) {
+                          val it2 = Item(m.groupValues[1].lowercase(), m.groupValues[2].trim())
+                          items.add(it2)
+                          cur = it2
+                          continue
+                      }
+                      cur?.steps?.add(l)
+                  }
+                  val frags = items.filter { it.kind == "fragment" }.associateBy { it.name }
+
+                  fun expand(steps: List<String>, depth: Int): List<String> {
+                      if (depth > 5) throw StepError("call zinciri çok derin.")
+                      val out = mutableListOf<String>()
+                      for (s in steps) {
+                          if (s.startsWith("call ")) {
+                              val name = s.substring(5).trim()
+                              val f = frags[name] ?: throw StepError("Fragment bulunamadı: $name")
+                              out.addAll(expand(f.steps, depth + 1))
+                          } else {
+                              out.add(s)
+                          }
+                      }
+                      return out
+                  }
+
+                  return items.filter { it.kind == "scenario" }.map {
+                      try {
+                          Sc(it.name, expand(it.steps, 0), null)
+                      } catch (e: StepError) {
+                          Sc(it.name, emptyList(), e.message)
+                      }
+                  }
+              }
+
+              // ---------------------------------------------------------------- ekran okuma
+              private fun nodes(svc: AutoService): List<AccessibilityNodeInfo> {
+                  val out = ArrayList<AccessibilityNodeInfo>()
+                  val root = svc.rootInActiveWindow ?: return out
+                  fun walk(n: AccessibilityNodeInfo, d: Int) {
+                      if (d > 60 || out.size > 1500) return
+                      out.add(n)
+                      for (i in 0 until n.childCount) {
+                          val c = n.getChild(i) ?: continue
+                          walk(c, d + 1)
+                      }
+                  }
+                  walk(root, 0)
+                  return out
+              }
+
+              private fun parseSel(s: String): Sel {
+                  val m = Regex("^(text|desc|id|class)(~?)=(.*)$").find(s.trim())
+                  return if (m == null) Sel("any", true, s.trim())
+                  else Sel(m.groupValues[1], m.groupValues[2] == "~", m.groupValues[3])
+              }
+
+              private fun matches(n: AccessibilityNodeInfo, s: Sel): Boolean {
+                  if (!n.isVisibleToUser) return false
+                  val text = n.text?.toString() ?: ""
+                  val desc = n.contentDescription?.toString() ?: ""
+                  val id = n.viewIdResourceName ?: ""
+                  val cls = n.className?.toString() ?: ""
+                  return when (s.key) {
+                      "any" -> text.contains(s.v) || desc.contains(s.v)
+                      "text" -> if (s.contains) text.contains(s.v) else text == s.v
+                      "desc" -> if (s.contains) desc.contains(s.v) else desc == s.v
+                      "id" -> if (s.contains) id.contains(s.v) else (id == s.v || id.endsWith("/" + s.v))
+                      else -> if (s.contains) cls.contains(s.v) else cls.endsWith(s.v)
+                  }
+              }
+
+              private fun screenTexts(list: List<AccessibilityNodeInfo>): String {
+                  val seen = LinkedHashSet<String>()
+                  for (n in list) {
+                      for (t in listOf(n.text?.toString(), n.contentDescription?.toString())) {
+                          val s = t?.trim()
+                          if (!s.isNullOrEmpty()) seen.add(s)
+                      }
+                  }
+                  return if (seen.isEmpty()) "(ekranda metin yok)" else seen.take(25).joinToString(" | ")
+              }
+
+              /** Ekrandaki öğeleri seçici yazmak için listeler. */
+              fun inspect(svc: AutoService): String {
+                  val sb = StringBuilder("Ekran: ${svc.rootInActiveWindow?.packageName ?: "?"}\n")
+                  for (n in nodes(svc)) {
+                      if (!n.isVisibleToUser) continue
+                      val t = n.text?.toString() ?: ""
+                      val id = (n.viewIdResourceName ?: "").substringAfter("/")
+                      val d = n.contentDescription?.toString() ?: ""
+                      if (t.isEmpty() && id.isEmpty() && d.isEmpty()) continue
+                      val cls = (n.className ?: "").toString().substringAfterLast('.')
+                      sb.append("text=$t | id=$id | desc=$d | $cls${if (n.isClickable) " ✓" else ""}\n")
+                  }
+                  return sb.toString()
+              }
+
+              // ---------------------------------------------------------------- bekleme / arama
+              private fun waitFor(c: Ctx, what: String, fn: (List<AccessibilityNodeInfo>) -> Any?): Any {
+                  val t0 = System.currentTimeMillis()
+                  while (true) {
+                      if (abort) throw StepError("Durduruldu.")
+                      val list = nodes(c.svc)
+                      val r = fn(list)
+                      if (r != null) return r
+                      if (System.currentTimeMillis() - t0 > c.timeout) {
+                          throw StepError("$what — ${c.timeout / 1000} sn içinde gerçekleşmedi. Ekrandaki metinler: ${screenTexts(list)}")
+                      }
+                      Thread.sleep(300)
+                  }
+              }
+
+              private fun find(c: Ctx, selText: String, what: String, preferEditable: Boolean = false): AccessibilityNodeInfo {
+                  val sel = parseSel(selText)
+                  return waitFor(c, "$what $selText") { list ->
+                      val hit = list.filter { matches(it, sel) }
+                      (if (preferEditable) hit.firstOrNull { it.isEditable } else null) ?: hit.firstOrNull()
+                  } as AccessibilityNodeInfo
+              }
+
+              private fun tapAt(svc: AutoService, n: AccessibilityNodeInfo) {
+                  val r = Rect()
+                  n.getBoundsInScreen(r)
+                  val p = Path()
+                  p.moveTo(r.exactCenterX(), r.exactCenterY())
+                  val g = GestureDescription.Builder()
+                      .addStroke(GestureDescription.StrokeDescription(p, 0L, 60L))
+                      .build()
+                  if (!svc.dispatchGesture(g, null, null)) throw StepError("Dokunma gönderilemedi.")
+              }
+
+              private fun launch(c: Ctx) {
+                  val i = c.svc.packageManager.getLaunchIntentForPackage(c.pkg)
+                      ?: throw StepError("Uygulama başlatılamadı: ${c.pkg}")
+                  i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                  c.svc.startActivity(i)
+                  waitFor(c, "Uygulama açılmadı") { _ ->
+                      if (c.svc.rootInActiveWindow?.packageName?.toString() == c.pkg) true else null
+                  }
+              }
+
+              // ---------------------------------------------------------------- adımlar
+              private fun exec(c: Ctx, line: String) {
+                  val sp = line.indexOf(' ')
+                  val cmd = if (sp < 0) line else line.substring(0, sp)
+                  val rest = if (sp < 0) "" else line.substring(sp + 1).trim()
+                  when (cmd) {
+                      "launch", "restart" -> launch(c)
+                      "tap" -> {
+                          val n = find(c, rest, "tap")
+                          var t: AccessibilityNodeInfo? = n
+                          while (t != null && !t.isClickable) t = t.parent
+                          if (t == null || !t.performAction(AccessibilityNodeInfo.ACTION_CLICK)) tapAt(c.svc, n)
+                      }
+                      "type" -> {
+                          val m = Regex("^(.*?)\\s+=\\s?(.*)$").find(rest)
+                              ?: throw StepError("Söz dizimi: type <seçici> = değer")
+                          val n = find(c, m.groupValues[1], "type", true)
+                          n.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                          val args = Bundle()
+                          args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, m.groupValues[2])
+                          if (!n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+                              throw StepError("Metin yazılamadı: alan düzenlenebilir değil.")
+                          }
+                      }
+                      "wait" -> Thread.sleep(rest.toLong())
+                      "back" -> c.svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                      "home" -> c.svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+                      "scroll" -> {
+                          val fwd = rest != "up"
+                          val n = waitFor(c, "scroll") { list ->
+                              list.firstOrNull { it.isScrollable && it.isVisibleToUser }
+                          } as AccessibilityNodeInfo
+                          n.performAction(
+                              if (fwd) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                          )
+                      }
+                      "expect" -> {
+                          val m = Regex("^(visible|gone|enabled|disabled|checked|count)\\s+(.*)$").find(rest)
+                              ?: throw StepError("Söz dizimi: expect visible|gone|enabled|disabled|checked|count <seçici>")
+                          val kind = m.groupValues[1]
+                          val arg = m.groupValues[2]
+                          if (kind == "count") {
+                              val mm = Regex("^(.*?)\\s+=\\s*(\\d+)$").find(arg)
+                                  ?: throw StepError("Söz dizimi: expect count <seçici> = sayı")
+                              val sel = parseSel(mm.groupValues[1])
+                              val want = mm.groupValues[2].toInt()
+                              waitFor(c, "expect count $arg") { list ->
+                                  if (list.count { matches(it, sel) } == want) true else null
+                              }
+                          } else {
+                              val sel = parseSel(arg)
+                              waitFor(c, "expect $kind $arg") { list ->
+                                  val hit = list.firstOrNull { matches(it, sel) }
+                                  val ok = when (kind) {
+                                      "gone" -> hit == null
+                                      "visible" -> hit != null
+                                      "enabled" -> hit != null && hit.isEnabled
+                                      "disabled" -> hit != null && !hit.isEnabled
+                                      else -> hit != null && hit.isChecked
+                                  }
+                                  if (ok) true else null
+                              }
+                          }
+                      }
+                      else -> throw StepError("Bilinmeyen adım: $cmd")
+                  }
+              }
+
+              // ---------------------------------------------------------------- çalıştırma
+              fun start(svc: AutoService, pkg: String, script: String, timeoutMs: Long, delayMs: Long) {
+                  if (RunState.running) return
+                  abort = false
+                  RunState.clear()
+                  RunState.running = true
+                  Thread {
+                      var pass = 0
+                      var fail = 0
+                      try {
+                          val c = Ctx(svc, pkg, timeoutMs)
+                          for (sc in parse(script)) {
+                              if (abort) break
+                              RunState.add("▶ ${sc.name}")
+                              if (sc.error != null) {
+                                  RunState.add("  ✗ ${sc.error}")
+                                  fail++
+                                  continue
+                              }
+                              var ok = true
+                              try {
+                                  launch(c)
+                              } catch (e: StepError) {
+                                  RunState.add("  ✗ Başlatılamadı: ${e.message}")
+                                  fail++
+                                  continue
+                              }
+                              for (step in sc.steps) {
+                                  val s0 = System.currentTimeMillis()
+                                  try {
+                                      exec(c, step)
+                                      RunState.add("  ✓ $step (${System.currentTimeMillis() - s0} ms)")
+                                  } catch (e: StepError) {
+                                      RunState.add("  ✗ $step\n      ${e.message}")
+                                      ok = false
+                                      break
+                                  } catch (e: Exception) {
+                                      RunState.add("  ✗ $step\n      Beklenmeyen hata: ${e.message}")
+                                      ok = false
+                                      break
+                                  }
+                                  Thread.sleep(delayMs)
+                              }
+                              if (ok) pass++ else fail++
+                          }
+                      } catch (e: Exception) {
+                          RunState.add("Hata: ${e.message}")
+                      } finally {
+                          RunState.add("Özet: $pass geçti, $fail kaldı")
+                          RunState.running = false
+                          try {
+                              val i = Intent(svc, MainActivity::class.java)
+                              i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                              svc.startActivity(i)
+                          } catch (e: Exception) {
+                              // Arka plandan açma engellenmiş olabilir; sonuçlar uygulamaya dönünce görünür.
+                          }
+                      }
+                  }.start()
+              }
+          }
+          KOSUCU_EOF
+          cat > app/src/main/java/com/qa/apkrunner/MainActivity.kt <<'KOSUCU_EOF'
+          package com.qa.apkrunner
+
+          import android.app.Activity
+          import android.app.PendingIntent
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageInstaller
+          import android.graphics.Typeface
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.Settings
+          import android.text.InputType
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+          import java.io.File
+
+          class MainActivity : Activity() {
+
+              private lateinit var svcStatus: TextView
+              private lateinit var apkInfo: TextView
+              private lateinit var pkgField: EditText
+              private lateinit var script: EditText
+              private lateinit var results: TextView
+              private lateinit var runBtn: Button
+              private var apkFile: File? = null
+              private val ui = Handler(Looper.getMainLooper())
+              private val tick = object : Runnable {
+                  override fun run() {
+                      refresh()
+                      ui.postDelayed(this, 700)
+                  }
+              }
+
+              private val defaultScript = """
+          # Her senaryo başında uygulama yeniden açılır (veri silinmez).
+          # Seçiciler: text=Tam Metin | text~=İçerir | id=login_button | desc=Açıklama
+          # Tek kelime yazarsan metin/açıklamada aranır:  tap Giriş
+          # Seçiciyi bulmak için "Ekranı tara" butonunu kullan.
+
+          fragment: Giriş yap
+          type id=username = demo
+          type id=password = Test1234!
+          tap text=Giriş yap
+          expect visible text~=Hoş geldin
+
+          scenario: Uygulama açılıyor
+          expect visible text~=Giriş
+          """.trimStart()
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(14), dp(14), dp(14), dp(14))
+                      fitsSystemWindows = true
+                  }
+                  fun label(t: String) = TextView(this).apply {
+                      text = t
+                      textSize = 16f
+                      setTypeface(typeface, Typeface.BOLD)
+                      setPadding(0, dp(16), 0, dp(4))
+                  }
+                  fun btn(t: String, f: () -> Unit) = Button(this).apply {
+                      text = t
+                      isAllCaps = false
+                      setOnClickListener { f() }
+                  }
+
+                  root.addView(TextView(this).apply { text = "APK Koşucu"; textSize = 22f; setTypeface(typeface, Typeface.BOLD) })
+
+                  root.addView(label("1. Erişilebilirlik hizmeti"))
+                  svcStatus = TextView(this)
+                  root.addView(svcStatus)
+                  root.addView(btn("Erişilebilirlik ayarlarını aç") {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  })
+
+                  root.addView(label("2. APK"))
+                  root.addView(btn("APK seç") { pickApk() })
+                  apkInfo = TextView(this).apply { text = "Henüz seçilmedi" }
+                  root.addView(apkInfo)
+                  root.addView(btn("Cihaza kur") { install() })
+                  pkgField = EditText(this).apply {
+                      hint = "Paket adı (ör. com.banka.mobil)"
+                      setSingleLine(true)
+                  }
+                  root.addView(pkgField)
+
+                  root.addView(label("3. Test adımları"))
+                  script = EditText(this).apply {
+                      setText(defaultScript)
+                      typeface = Typeface.MONOSPACE
+                      textSize = 12f
+                      minLines = 12
+                      gravity = Gravity.TOP
+                      inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                          InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                  }
+                  root.addView(script)
+
+                  val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  runBtn = btn("Çalıştır") { runTests() }
+                  val w = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  row.addView(runBtn, w)
+                  row.addView(btn("Durdur") { Engine.abort = true }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  row.addView(btn("Ekranı tara") { inspect() }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  root.addView(row)
+
+                  root.addView(label("Sonuçlar"))
+                  results = TextView(this).apply {
+                      typeface = Typeface.MONOSPACE
+                      textSize = 12f
+                      setTextIsSelectable(true)
+                  }
+                  root.addView(results)
+
+                  setContentView(ScrollView(this).apply { addView(root) })
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  ui.post(tick)
+              }
+
+              override fun onPause() {
+                  ui.removeCallbacks(tick)
+                  super.onPause()
+              }
+
+              private fun refresh() {
+                  svcStatus.text = if (AutoService.instance != null) "Açık ✓"
+                  else "Kapalı. Ayarlardan \"APK Koşucu\" hizmetini aç."
+                  val t = RunState.text()
+                  val shown = if (t.isEmpty()) "Henüz çalıştırılmadı." else t
+                  if (results.text.toString() != shown) results.text = shown
+                  runBtn.isEnabled = !RunState.running
+              }
+
+              private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
+
+              // ---------------------------------------------------------------- APK seçme / kurma
+              private fun pickApk() {
+                  val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                      addCategory(Intent.CATEGORY_OPENABLE)
+                      type = "*/*"
+                  }
+                  startActivityForResult(i, 1)
+              }
+
+              @Deprecated("Basit tutmak için eski API")
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  val uri = data?.data
+                  if (requestCode == 1 && resultCode == RESULT_OK && uri != null) loadApk(uri)
+              }
+
+              private fun loadApk(uri: Uri) {
+                  apkInfo.text = "Okunuyor…"
+                  Thread {
+                      try {
+                          val f = File(cacheDir, "target.apk")
+                          contentResolver.openInputStream(uri)!!.use { ins -> f.outputStream().use { ins.copyTo(it) } }
+                          @Suppress("DEPRECATION")
+                          val info = packageManager.getPackageArchiveInfo(f.absolutePath, 0)
+                          runOnUiThread {
+                              if (info == null) {
+                                  apkFile = null
+                                  apkInfo.text = "Geçerli bir APK değil."
+                              } else {
+                                  apkFile = f
+                                  pkgField.setText(info.packageName)
+                                  apkInfo.text = "${info.packageName}  v${info.versionName ?: "?"}  (${f.length() / 1048576} MB)"
+                              }
+                          }
+                      } catch (e: Exception) {
+                          runOnUiThread { apkInfo.text = "Okunamadı: ${e.message}" }
+                      }
+                  }.start()
+              }
+
+              private fun install() {
+                  val f = apkFile
+                  if (f == null) { toast("Önce bir APK seç."); return }
+                  if (!packageManager.canRequestPackageInstalls()) {
+                      startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+                      toast("Bu uygulamaya kurulum izni ver, sonra tekrar \"Cihaza kur\"a bas.")
+                      return
+                  }
+                  Thread {
+                      try {
+                          val pi = packageManager.packageInstaller
+                          val id = pi.createSession(PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL))
+                          pi.openSession(id).use { s ->
+                              f.inputStream().use { ins ->
+                                  s.openWrite("base.apk", 0, f.length()).use { out ->
+                                      ins.copyTo(out)
+                                      s.fsync(out)
+                                  }
+                              }
+                              val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+                              val pending = PendingIntent.getBroadcast(this, id, Intent(this, InstallReceiver::class.java), flags)
+                              s.commit(pending.intentSender)
+                          }
+                      } catch (e: Exception) {
+                          RunState.add("Kurulum hatası: ${e.message}")
+                      }
+                  }.start()
+              }
+
+              // ---------------------------------------------------------------- çalıştırma
+              private fun runTests() {
+                  val svc = AutoService.instance
+                  if (svc == null) { toast("Önce erişilebilirlik hizmetini aç."); return }
+                  val pkg = pkgField.text.toString().trim()
+                  if (pkg.isEmpty() || packageManager.getLaunchIntentForPackage(pkg) == null) {
+                      toast("Paket kurulu değil ya da açılamıyor. Önce \"Cihaza kur\".")
+                      return
+                  }
+                  Engine.start(svc, pkg, script.text.toString(), 8000L, 300L)
+              }
+
+              private fun inspect() {
+                  val svc = AutoService.instance
+                  if (svc == null) { toast("Önce erişilebilirlik hizmetini aç."); return }
+                  toast("5 sn içinde taranacak: test edeceğin ekrana geç.")
+                  RunState.clear()
+                  RunState.add("5 sn içinde ekran taranacak…")
+                  Thread {
+                      Thread.sleep(5000)
+                      val s = Engine.inspect(svc)
+                      RunState.clear()
+                      RunState.add(s)
+                  }.start()
+              }
+          }
+
+          /** PackageInstaller sonuçlarını alır; kullanıcı onayı gerekiyorsa onay ekranını açar. */
+          class InstallReceiver : BroadcastReceiver() {
+
+              @Suppress("DEPRECATION")
+              private fun confirmIntent(i: Intent): Intent? =
+                  if (Build.VERSION.SDK_INT >= 33) i.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
+                  else i.getParcelableExtra(Intent.EXTRA_INTENT)
+
+              override fun onReceive(c: Context, i: Intent) {
+                  when (i.getIntExtra(PackageInstaller.EXTRA_STATUS, -1)) {
+                      PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                          val confirm = confirmIntent(i)
+                          if (confirm != null) {
+                              confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                              c.startActivity(confirm)
+                          }
+                      }
+                      PackageInstaller.STATUS_SUCCESS -> RunState.add("Kuruldu ✓")
+                      else -> RunState.add("Kurulum başarısız: ${i.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)}")
+                  }
+              }
+          }
+          KOSUCU_EOF
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Debug APK derle
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk-kosucu
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: APK'yı Release olarak yayınla (telefondan doğrudan indirmek için)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: APK Koşucu ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
